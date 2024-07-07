@@ -8,9 +8,10 @@
 use super::{
     Deserialization, DeserializationFailure, DeserializeError, Mtp, RpcResult, RpcResultError,
 };
+use crate::utils::StackBuffer;
 use crate::{manual_tl, MsgId};
 use getrandom::getrandom;
-use grammers_crypto::{decrypt_data_v2, encrypt_data_v2, AuthKey, RingBuffer};
+use grammers_crypto::{decrypt_data_v2, encrypt_data_v2, AuthKey, DequeBuffer};
 use grammers_tl_types::{self as tl, Cursor, Deserializable, Identifiable, Serializable};
 use log::info;
 use std::mem;
@@ -207,7 +208,7 @@ impl Encrypted {
 
     fn serialize_msg(
         &mut self,
-        buffer: &mut RingBuffer<u8>,
+        buffer: &mut DequeBuffer<u8>,
         body: &[u8],
         content_related: bool,
     ) -> MsgId {
@@ -226,7 +227,7 @@ impl Encrypted {
         self.salts.last().map(|s| s.salt).unwrap_or(0)
     }
 
-    fn try_request_salts(&mut self, buffer: &mut RingBuffer<u8>) {
+    fn try_request_salts(&mut self, buffer: &mut DequeBuffer<u8>) {
         if self.salts.len() == 1
             && self.salt_request_msg_id.is_none()
             && self.get_current_salt() != 0
@@ -252,7 +253,7 @@ impl Encrypted {
     /// `finalize`, but without encryption.
     ///
     /// The buffer is *not* cleared, but is instead returned.
-    fn finalize_plain(&mut self, buffer: &mut RingBuffer<u8>) {
+    fn finalize_plain(&mut self, buffer: &mut DequeBuffer<u8>) {
         if self.msg_count == 0 {
             return;
         }
@@ -261,7 +262,7 @@ impl Encrypted {
             // Prepend a container, setting its message ID and sequence number.
             // + 8 because it has to include the constructor ID and length (4 bytes each).
             let len = (buffer.len() + 8) as i32;
-            let mut header = buffer.shift(MESSAGE_CONTAINER_HEADER_LEN);
+            let mut header = StackBuffer::<MESSAGE_CONTAINER_HEADER_LEN>::new();
 
             // Manually `serialize_msg` because the container body was already written.
             self.get_new_msg_id().serialize(&mut header);
@@ -271,14 +272,16 @@ impl Encrypted {
 
             manual_tl::MessageContainer::CONSTRUCTOR_ID.serialize(&mut header);
             (self.msg_count as i32).serialize(&mut header);
+            buffer.extend_front(&header.into_inner());
         }
 
         {
             // Prepend the message header
-            let mut header = buffer.shift(PLAIN_PACKET_HEADER_LEN);
+            let mut header = StackBuffer::<PLAIN_PACKET_HEADER_LEN>::new();
             self.get_current_salt().serialize(&mut header); // 8 bytes
 
             self.client_id.serialize(&mut header); // 8 bytes
+            buffer.extend_front(&header.into_inner());
         }
 
         self.msg_count = 0;
@@ -1190,7 +1193,7 @@ impl Mtp for Encrypted {
     /// efficiency. If the buffer is full, returns `None`.
     ///
     /// [MTProto 2.0 guidelines]: https://core.telegram.org/mtproto/description.
-    fn push(&mut self, buffer: &mut RingBuffer<u8>, request: &[u8]) -> Option<MsgId> {
+    fn push(&mut self, buffer: &mut DequeBuffer<u8>, request: &[u8]) -> Option<MsgId> {
         // TODO rather than taking in bytes, take requests, serialize them in place, and if too large drop the last part of the buffer
 
         // Check to see if the next salt can be used already. If it can, drop the current one and,
@@ -1261,7 +1264,7 @@ impl Mtp for Encrypted {
         Some(self.serialize_msg(buffer, body, true))
     }
 
-    fn finalize(&mut self, buffer: &mut RingBuffer<u8>) -> Option<MsgId> {
+    fn finalize(&mut self, buffer: &mut DequeBuffer<u8>) -> Option<MsgId> {
         self.finalize_plain(buffer);
         if buffer.is_empty() {
             None
@@ -1339,7 +1342,7 @@ mod tests {
 
     #[test]
     fn ensure_serialization_has_salt_client_id() {
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build().finish(auth_key());
 
         mtproto.push(&mut buffer, REQUEST);
@@ -1357,7 +1360,7 @@ mod tests {
 
     #[test]
     fn ensure_correct_single_serialization() {
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build().finish(auth_key());
 
         assert!(mtproto.push(&mut buffer, REQUEST).is_some());
@@ -1369,7 +1372,7 @@ mod tests {
 
     #[test]
     fn ensure_correct_multi_serialization() {
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build()
             .compression_threshold(None)
             .finish(auth_key());
@@ -1401,7 +1404,7 @@ mod tests {
 
     #[test]
     fn ensure_correct_single_large_serialization() {
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build()
             .compression_threshold(None)
             .finish(auth_key());
@@ -1416,7 +1419,7 @@ mod tests {
 
     #[test]
     fn ensure_correct_multi_large_serialization() {
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build()
             .compression_threshold(None)
             .finish(auth_key());
@@ -1434,7 +1437,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn ensure_large_payload_panics() {
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build().finish(auth_key());
 
         mtproto.push(&mut buffer, &vec![0; 2 * 1024 * 1024]);
@@ -1443,7 +1446,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn ensure_non_padded_payload_panics() {
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build().finish(auth_key());
 
         mtproto.push(&mut buffer, &[1, 2, 3]);
@@ -1452,7 +1455,7 @@ mod tests {
     #[test]
     fn ensure_no_compression_is_honored() {
         // A large vector of null bytes should compress
-        let mut buffer = RingBuffer::with_capacity(0, 0);
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
         let mut mtproto = Encrypted::build()
             .compression_threshold(None)
             .finish(auth_key());
@@ -1467,7 +1470,7 @@ mod tests {
         // A large vector of null bytes should compress
         {
             // High threshold not reached, should not compress
-            let mut buffer = RingBuffer::with_capacity(0, 0);
+            let mut buffer = DequeBuffer::with_capacity(0, 0);
             let mut mtproto = Encrypted::build()
                 .compression_threshold(Some(768 * 1024))
                 .finish(auth_key());
@@ -1477,7 +1480,7 @@ mod tests {
         }
         {
             // Low threshold is exceeded, should compress
-            let mut buffer = RingBuffer::with_capacity(0, 0);
+            let mut buffer = DequeBuffer::with_capacity(0, 0);
             let mut mtproto = Encrypted::build()
                 .compression_threshold(Some(256 * 1024))
                 .finish(auth_key());
@@ -1487,7 +1490,7 @@ mod tests {
         }
         {
             // The default should compress
-            let mut buffer = RingBuffer::with_capacity(0, 0);
+            let mut buffer = DequeBuffer::with_capacity(0, 0);
             let mut mtproto = Encrypted::build().finish(auth_key());
             mtproto.push(&mut buffer, &vec![0; 512 * 1024]);
             mtproto.finalize_plain(&mut buffer);
