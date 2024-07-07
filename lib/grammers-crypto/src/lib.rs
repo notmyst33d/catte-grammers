@@ -184,6 +184,89 @@ pub fn decrypt_data_v2(ciphertext: &[u8], auth_key: &AuthKey) -> Result<Vec<u8>,
     Ok(plaintext)
 }
 
+/// This method is meant for server-side implementations
+fn do_encrypt_data_server_v2(buffer: &mut RingBuffer<u8>, auth_key: &AuthKey, random_padding: &[u8; 32]) {
+    // "Note that MTProto 2.0 requires from 12 to 1024 bytes of padding"
+    // "[...] the resulting message length be divisible by 16 bytes"
+    let padding_len = determine_padding_v2_length(buffer.len());
+    buffer.extend(random_padding.iter().take(padding_len));
+
+    // Encryption is done by the client
+    let side = Side::Server;
+    let x = side.x();
+
+    // msg_key_large = SHA256 (substr (auth_key, 88+x, 32) + plaintext + random_padding);
+    let msg_key_large = sha256!(&auth_key.data[88 + x..88 + x + 32], &buffer[..]);
+
+    // msg_key = substr (msg_key_large, 8, 16);
+    let msg_key = {
+        let mut buffer = [0; 16];
+        buffer.copy_from_slice(&msg_key_large[8..8 + 16]);
+        buffer
+    };
+
+    // Calculate the key
+    let (key, iv) = calc_key(auth_key, &msg_key, side);
+
+    aes::ige_encrypt(&mut buffer[..], &key, &iv);
+
+    let mut head = buffer.shift(auth_key.key_id.len() + msg_key.len());
+    head.extend(auth_key.key_id.iter().copied());
+    head.extend(msg_key.iter().copied());
+}
+
+/// This method is meant for server-side implementations
+pub fn encrypt_data_server_v2(buffer: &mut RingBuffer<u8>, auth_key: &AuthKey) {
+    let random_padding = {
+        let mut rnd = [0; 32];
+        getrandom(&mut rnd).expect("failed to generate a secure padding");
+        rnd
+    };
+
+    do_encrypt_data_server_v2(buffer, auth_key, &random_padding)
+}
+
+/// This method is meant for server-side implementations
+pub fn decrypt_data_server_v2(ciphertext: &[u8], auth_key: &AuthKey) -> Result<(Vec<u8>, u32), Error> {
+    // Decryption is done from the client
+    let side = Side::Client;
+    let x = side.x();
+
+    if ciphertext.len() < 24 || (ciphertext.len() - 24) % 16 != 0 {
+        return Err(Error::InvalidBuffer);
+    }
+
+    // TODO Check salt, session_id and sequence_number
+    let key_id = &ciphertext[..8];
+    if auth_key.key_id != *key_id {
+        return Err(Error::AuthKeyMismatch);
+    }
+
+    let msg_key = {
+        let mut buffer = [0; 16];
+        buffer.copy_from_slice(&ciphertext[8..8 + 16]);
+        buffer
+    };
+
+    let (key, iv) = calc_key(auth_key, &msg_key, Side::Client);
+    let plaintext = decrypt_ige(&ciphertext[24..], &key, &iv);
+
+    // https://core.telegram.org/mtproto/security_guidelines#mtproto-encrypted-messages
+    let our_key = sha256!(&auth_key.data[88 + x..88 + x + 32], &plaintext);
+
+    if msg_key != our_key[8..8 + 16] {
+        return Err(Error::MessageKeyMismatch);
+    }
+
+    let ack_token = {
+        let mut buffer = [0; 4];
+        buffer.clone_from_slice(&our_key[..4]);
+        u32::from_le_bytes(buffer) | (1 << 31)
+    };
+
+    Ok((plaintext, ack_token))
+}
+
 /// Generate the AES key and initialization vector from the server nonce
 /// and the new client nonce. This is done after the DH exchange.
 pub fn generate_key_data_from_nonce(
