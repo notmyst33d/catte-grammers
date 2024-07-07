@@ -184,13 +184,13 @@ pub fn decrypt_data_v2(ciphertext: &[u8], auth_key: &AuthKey) -> Result<Vec<u8>,
 }
 
 /// This method is meant for server-side implementations
-fn do_encrypt_data_server_v2(buffer: &mut RingBuffer<u8>, auth_key: &AuthKey, random_padding: &[u8; 32]) {
+fn do_encrypt_data_server_v2(buffer: &mut DequeBuffer<u8>, auth_key: &AuthKey, random_padding: &[u8; 32]) {
     // "Note that MTProto 2.0 requires from 12 to 1024 bytes of padding"
     // "[...] the resulting message length be divisible by 16 bytes"
     let padding_len = determine_padding_v2_length(buffer.len());
     buffer.extend(random_padding.iter().take(padding_len));
 
-    // Encryption is done by the client
+    // Encryption is done by the server
     let side = Side::Server;
     let x = side.x();
 
@@ -209,13 +209,12 @@ fn do_encrypt_data_server_v2(buffer: &mut RingBuffer<u8>, auth_key: &AuthKey, ra
 
     aes::ige_encrypt(&mut buffer[..], &key, &iv);
 
-    let mut head = buffer.shift(auth_key.key_id.len() + msg_key.len());
-    head.extend(auth_key.key_id.iter().copied());
-    head.extend(msg_key.iter().copied());
+    buffer.extend_front(&msg_key);
+    buffer.extend_front(&auth_key.key_id);
 }
 
 /// This method is meant for server-side implementations
-pub fn encrypt_data_server_v2(buffer: &mut RingBuffer<u8>, auth_key: &AuthKey) {
+pub fn encrypt_data_server_v2(buffer: &mut DequeBuffer<u8>, auth_key: &AuthKey) {
     let random_padding = {
         let mut rnd = [0; 32];
         getrandom(&mut rnd).expect("failed to generate a secure padding");
