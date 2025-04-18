@@ -5,8 +5,9 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::{Chat, ChatMap, User};
-use crate::{client::Client, utils::generate_random_id, InputMessage};
+
+use super::super::{Chat, ChatMap, User};
+use crate::{InputMessage, client::Client, utils::generate_random_id};
 use grammers_mtsender::InvocationError;
 use grammers_tl_types as tl;
 use std::fmt;
@@ -52,7 +53,7 @@ impl InlineQuery {
         }
     }
 
-    // User that sent the query.
+    /// User that sent the query
     pub fn sender(&self) -> &User {
         match self
             .chats
@@ -69,19 +70,22 @@ impl InlineQuery {
         }
     }
 
-    // The text of the inline query.
+    /// The text of the inline query.
     pub fn text(&self) -> &str {
         self.raw.query.as_str()
     }
 
-    // The offset of the inline query.
+    /// The offset of the inline query.
     pub fn offset(&self) -> &str {
         self.raw.offset.as_str()
     }
 
     /// Answer the inline query.
     // TODO: add example
-    pub fn answer(&self, results: impl IntoIterator<Item = InlineResult>) -> Answer {
+    pub fn answer<T>(&self, results: impl IntoIterator<Item = T>) -> Answer
+    where
+        T: Into<tl::enums::InputBotInlineResult>,
+    {
         Answer {
             request: tl::functions::messages::SetInlineBotResults {
                 gallery: false,
@@ -95,6 +99,16 @@ impl InlineQuery {
             },
             client: self.client.clone(),
         }
+    }
+
+    /// Type of the chat from which the inline query was sent.
+    pub fn peer_type(&self) -> Option<tl::enums::InlineQueryPeerType> {
+        self.raw.peer_type.clone()
+    }
+
+    /// Query ID
+    pub fn query_id(&self) -> i64 {
+        self.raw.query_id
     }
 }
 
@@ -195,36 +209,40 @@ impl Article {
 
 impl From<Article> for InlineResult {
     fn from(article: Article) -> Self {
-        Self(tl::enums::InputBotInlineResult::Result(
-            tl::types::InputBotInlineResult {
-                id: article
-                    .id
-                    .unwrap_or_else(|| generate_random_id().to_string()),
-                r#type: "article".into(),
-                title: Some(article.title),
-                description: article.description,
-                url: article.url,
-                thumb: article.thumb_url.map(|url| {
-                    tl::enums::InputWebDocument::Document(tl::types::InputWebDocument {
-                        url,
-                        size: 0,
-                        mime_type: "image/jpeg".into(),
-                        attributes: vec![],
-                    })
-                }),
-                content: None,
-                // TODO: also allow other types of messages than text
-                send_message: tl::enums::InputBotInlineMessage::Text(
-                    tl::types::InputBotInlineMessageText {
-                        no_webpage: !article.input_message.link_preview,
-                        invert_media: false,
-                        message: article.input_message.text,
-                        entities: Some(article.input_message.entities),
-                        reply_markup: article.input_message.reply_markup,
-                    },
-                ),
-            },
-        ))
+        Self(article.into())
+    }
+}
+
+impl From<Article> for tl::enums::InputBotInlineResult {
+    fn from(article: Article) -> Self {
+        tl::enums::InputBotInlineResult::Result(tl::types::InputBotInlineResult {
+            id: article
+                .id
+                .unwrap_or_else(|| generate_random_id().to_string()),
+            r#type: "article".into(),
+            title: Some(article.title),
+            description: article.description,
+            url: article.url,
+            thumb: article.thumb_url.map(|url| {
+                tl::enums::InputWebDocument::Document(tl::types::InputWebDocument {
+                    url,
+                    size: 0,
+                    mime_type: "image/jpeg".into(),
+                    attributes: vec![],
+                })
+            }),
+            content: None,
+            // TODO: also allow other types of messages than text
+            send_message: tl::enums::InputBotInlineMessage::Text(
+                tl::types::InputBotInlineMessageText {
+                    no_webpage: !article.input_message.link_preview,
+                    invert_media: article.input_message.invert_media,
+                    message: article.input_message.text,
+                    entities: Some(article.input_message.entities),
+                    reply_markup: article.input_message.reply_markup,
+                },
+            ),
+        })
     }
 }
 
@@ -232,7 +250,9 @@ impl fmt::Debug for InlineQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InlineQuery")
             .field("text", &self.text())
+            .field("peer_type", &self.peer_type())
             .field("sender", &self.sender())
+            .field("query_id", &self.query_id())
             .finish()
     }
 }

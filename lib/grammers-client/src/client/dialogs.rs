@@ -5,8 +5,8 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use crate::types::{ChatMap, Dialog, IterBuffer, Message};
 use crate::Client;
+use crate::types::{ChatMap, Dialog, IterBuffer, Message};
 use grammers_mtsender::InvocationError;
 use grammers_session::PackedChat;
 use grammers_tl_types as tl;
@@ -150,7 +150,7 @@ impl Client {
     ///
     /// while let Some(dialog) = dialogs.next().await? {
     ///     let chat = dialog.chat();
-    ///     println!("{} ({})", chat.name(), chat.id());
+    ///     println!("{} ({})", chat.name().unwrap_or_default(), chat.id());
     /// }
     /// # Ok(())
     /// # }

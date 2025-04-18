@@ -5,8 +5,8 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::defs::{Entry, Gap, PtsInfo, NO_PTS, NO_SEQ};
 use super::ChatHashCache;
+use super::defs::{Entry, Gap, NO_PTS, NO_SEQ, PtsInfo};
 use grammers_tl_types as tl;
 use log::info;
 
@@ -59,6 +59,7 @@ pub(super) fn update_short_message(
                 pinned: false,
                 noforwards: false,
                 invert_media: false,
+                video_processing_pending: false,
                 reactions: None,
                 id: short.id,
                 from_id: Some(
@@ -94,6 +95,7 @@ pub(super) fn update_short_message(
                 via_business_bot_id: None,
                 effect: None,
                 factcheck: None,
+                report_delivery_until_date: None,
             }
             .into(),
             pts: short.pts,
@@ -121,6 +123,7 @@ pub(super) fn update_short_chat_message(
                 pinned: false,
                 noforwards: false,
                 invert_media: false,
+                video_processing_pending: false,
                 reactions: None,
                 id: short.id,
                 from_id: Some(
@@ -156,6 +159,7 @@ pub(super) fn update_short_chat_message(
                 via_business_bot_id: None,
                 effect: None,
                 factcheck: None,
+                report_delivery_until_date: None,
             }
             .into(),
             pts: short.pts,
@@ -533,6 +537,12 @@ impl PtsInfo {
             StarsBalance(_) => None,
             BusinessBotCallbackQuery(_) => None,
             StarsRevenueStatus(_) => None,
+            BotPurchasedPaidMedia(u) => Some(Self {
+                pts: u.qts,
+                pts_count: 1, // TODO unsure if 1
+                entry: Entry::SecretChats,
+            }),
+            PaidReactionPrivacy(_) => None,
         }
         .filter(|info| info.pts != NO_PTS)
     }

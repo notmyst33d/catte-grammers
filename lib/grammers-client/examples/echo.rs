@@ -10,7 +10,7 @@
 //! cargo run --example echo -- BOT_TOKEN
 //! ```
 
-use futures_util::future::{select, Either};
+use futures_util::future::{Either, select};
 use grammers_client::session::Session;
 use grammers_client::{Client, Config, InitParams, Update};
 use simple_logger::SimpleLogger;
@@ -26,7 +26,10 @@ async fn handle_update(client: Client, update: Update) -> Result {
     match update {
         Update::NewMessage(message) if !message.outgoing() => {
             let chat = message.chat();
-            println!("Responding to {}", chat.name());
+            println!(
+                "Responding to {}",
+                chat.name().unwrap_or(&format!("id {}", chat.id()))
+            );
             client.send_message(&chat, message.text()).await?;
         }
         _ => {}
@@ -71,24 +74,17 @@ async fn async_main() -> Result {
     // This code uses `select` on Ctrl+C to gracefully stop the client and have a chance to
     // save the session. You could have fancier logic to save the session if you wanted to
     // (or even save it on every update). Or you could also ignore Ctrl+C and just use
-    // `while let Some(updates) =  client.next_updates().await?`.
+    // `let update = client.next_update().await?`.
     //
     // Using `tokio::select!` would be a lot cleaner but add a heavy dependency,
     // so a manual `select` is used instead by pinning async blocks by hand.
     loop {
-        let update = {
-            let exit = pin!(async { tokio::signal::ctrl_c().await });
-            let upd = pin!(async { client.next_update().await });
+        let exit = pin!(async { tokio::signal::ctrl_c().await });
+        let upd = pin!(async { client.next_update().await });
 
-            match select(exit, upd).await {
-                Either::Left(_) => None,
-                Either::Right((u, _)) => Some(u),
-            }
-        };
-
-        let update = match update {
-            None | Some(Ok(None)) => break,
-            Some(u) => u?.unwrap(),
+        let update = match select(exit, upd).await {
+            Either::Left(_) => break,
+            Either::Right((u, _)) => u?,
         };
 
         let handle = client.clone();

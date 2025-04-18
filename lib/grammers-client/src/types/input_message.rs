@@ -8,17 +8,18 @@
 use super::attributes::Attribute;
 use crate::types::{Media, ReplyMarkup, Uploaded};
 use grammers_tl_types as tl;
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 // https://github.com/telegramdesktop/tdesktop/blob/e7fbcce9d9f0a8944eb2c34e74bd01b8776cb891/Telegram/SourceFiles/data/data_scheduled_messages.h#L52
 const SCHEDULE_ONCE_ONLINE: i32 = 0x7ffffffe;
 
 /// Construct and send rich text messages with various options.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct InputMessage {
     pub(crate) background: bool,
     pub(crate) clear_draft: bool,
     pub(crate) entities: Vec<tl::enums::MessageEntity>,
+    pub(crate) invert_media: bool,
     pub(crate) link_preview: bool,
     pub(crate) reply_markup: Option<tl::enums::ReplyMarkup>,
     pub(crate) reply_to: Option<i32>,
@@ -48,6 +49,14 @@ impl InputMessage {
     /// The formatting entities within the message (such as bold, italics, etc.).
     pub fn fmt_entities(mut self, entities: Vec<tl::enums::MessageEntity>) -> Self {
         self.entities = entities;
+        self
+    }
+
+    /// Whether the media will be inverted.
+    ///
+    /// If inverted, photos, videos, and documents will appear at the bottom and link previews at the top of the message.
+    pub fn invert_media(mut self, invert_media: bool) -> Self {
+        self.invert_media = invert_media;
         self
     }
 
@@ -172,9 +181,25 @@ impl InputMessage {
                 attributes: vec![(tl::types::DocumentAttributeFilename { file_name }).into()],
                 stickers: None,
                 ttl_seconds: self.media_ttl,
+                video_cover: None,
+                video_timestamp: None,
             })
             .into(),
         );
+        self
+    }
+
+    /// Include a media in the message using the raw TL types.
+    ///
+    /// You can use this to send any media using the raw TL types that don't have
+    /// a specific method in this builder such as Dice, Polls, etc.
+    ///
+    /// This can also be used to send media with a file reference, see `InputMediaDocument`
+    /// and `InputMediaPhoto` in the `grammers-tl-types` crate.
+    ///
+    /// The text will be the caption of the media, which may be empty for no caption.
+    pub fn media<M: Into<tl::enums::InputMedia>>(mut self, media: M) -> Self {
+        self.media = Some(media.into());
         self
     }
 
@@ -214,6 +239,8 @@ impl InputMessage {
                 spoiler: false,
                 url: url.into(),
                 ttl_seconds: self.media_ttl,
+                video_cover: None,
+                video_timestamp: None,
             })
             .into(),
         );
@@ -277,6 +304,8 @@ impl InputMessage {
                 attributes: vec![(tl::types::DocumentAttributeFilename { file_name }).into()],
                 stickers: None,
                 ttl_seconds: self.media_ttl,
+                video_cover: None,
+                video_timestamp: None,
             })
             .into(),
         );
@@ -375,6 +404,17 @@ impl From<String> for InputMessage {
         Self {
             text,
             ..Self::default()
+        }
+    }
+}
+
+impl From<&super::Message> for InputMessage {
+    fn from(message: &super::Message) -> Self {
+        Self {
+            text: message.text().to_owned(),
+            entities: message.fmt_entities().cloned().unwrap_or(Vec::new()),
+            media: message.media().and_then(|m| m.to_raw_input_media()),
+            ..Default::default()
         }
     }
 }

@@ -10,16 +10,16 @@
 
 use super::Client;
 use crate::types::{ChatMap, Update};
-use futures_util::future::{select, Either};
+use futures_util::future::{Either, select};
+use grammers_mtsender::utils::sleep_until;
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
 use grammers_session::channel_id;
 pub use grammers_session::{PrematureEndReason, UpdateState};
 use grammers_tl_types as tl;
-use log::warn;
 use std::pin::pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::time::sleep_until;
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long to wait after warning the user that the updates limit was exceeded.
 const UPDATE_LIMIT_EXCEEDED_LOG_COOLDOWN: Duration = Duration::from_secs(300);
@@ -27,16 +27,14 @@ const UPDATE_LIMIT_EXCEEDED_LOG_COOLDOWN: Duration = Duration::from_secs(300);
 impl Client {
     /// Returns the next update from the buffer where they are queued until used.
     ///
-    /// Similar using an iterator manually, this method will return `Some` until no more updates
-    /// are available (e.g. a graceful disconnection occurred).
-    ///
-    /// # Examples
+    /// # Example
     ///
     /// ```
     /// # async fn f(client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// use grammers_client::Update;
     ///
-    /// while let Some(update) = client.next_update().await? {
+    /// loop {
+    ///     let update = client.next_update().await?;
     ///     // Echo incoming messages and ignore everything else
     ///     match update {
     ///         Update::NewMessage(mut message) if !message.outgoing() => {
@@ -48,12 +46,43 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn next_update(&self) -> Result<Option<Update>, InvocationError> {
+    pub async fn next_update(&self) -> Result<Update, InvocationError> {
+        loop {
+            let (update, chats) = self.next_raw_update().await?;
+
+            if let Some(update) = Update::new(self, update, &chats) {
+                return Ok(update);
+            }
+        }
+    }
+
+    /// Returns the next raw update and associated chat map from the buffer where they are queued until used.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # async fn f(client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// loop {
+    ///     let (update, chats) = client.next_raw_update().await?;
+    ///
+    ///     // Print all incoming updates in their raw form
+    ///     dbg!(update);
+    /// }
+    /// # Ok(())
+    /// # }
+    ///
+    /// ```
+    ///
+    /// P.S. If you don't receive updateBotInlineSend, go to [@BotFather](https://t.me/BotFather), select your bot and click "Bot Settings", then "Inline Feedback" and select probability.
+    ///
+    pub async fn next_raw_update(
+        &self,
+    ) -> Result<(tl::enums::Update, Arc<ChatMap>), InvocationError> {
         loop {
             let (deadline, get_diff, get_channel_diff) = {
                 let state = &mut *self.0.state.write().unwrap();
-                if let Some(updates) = state.updates.pop_front() {
-                    return Ok(Some(updates));
+                if let Some(update) = state.updates.pop_front() {
+                    return Ok(update);
                 }
                 (
                     state.message_box.check_deadlines(), // first, as it might trigger differences
@@ -91,7 +120,9 @@ impl Client {
                         //
                         // This is a bit hacky because MessageBox doesn't really have a way to "not update" the pts.
                         // Instead we manually extract the previously-known pts and use that.
-                        log::warn!("Getting difference for channel updates caused PersistentTimestampOutdated; ending getting difference prematurely until server issues are resolved");
+                        log::warn!(
+                            "Getting difference for channel updates caused PersistentTimestampOutdated; ending getting difference prematurely until server issues are resolved"
+                        );
                         {
                             self.0
                                 .state
@@ -153,18 +184,12 @@ impl Client {
                 continue;
             }
 
-            let step = {
-                let sleep = pin!(async { sleep_until(deadline.into()).await });
-                let step = pin!(async { self.step().await });
+            let sleep = pin!(async { sleep_until(deadline).await });
+            let step = pin!(async { self.step().await });
 
-                match select(sleep, step).await {
-                    Either::Left(_) => None,
-                    Either::Right((step, _)) => Some(step),
-                }
-            };
-
-            if let Some(step) = step {
-                step?;
+            match select(sleep, step).await {
+                Either::Left(_) => {}
+                Either::Right((step, _)) => step?,
             }
         }
     }
@@ -223,7 +248,7 @@ impl Client {
 
                 updates.truncate(updates.len() - exceeds);
                 if notify {
-                    warn!(
+                    log::warn!(
                         "{} updates were dropped because the update_queue_limit was exceeded",
                         exceeds
                     );
@@ -233,11 +258,9 @@ impl Client {
             }
         }
 
-        state.updates.extend(
-            updates
-                .into_iter()
-                .flat_map(|u| Update::new(self, u, &chat_map)),
-        );
+        state
+            .updates
+            .extend(updates.into_iter().map(|u| (u, chat_map.clone())));
     }
 
     /// Synchronize the updates state to the session.
@@ -260,6 +283,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn ensure_next_update_future_impls_send() {
         if false {
             // We just want it to type-check, not actually run.

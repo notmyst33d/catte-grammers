@@ -26,20 +26,21 @@ mod adaptor;
 mod defs;
 
 use super::ChatHashCache;
+use crate::UpdateState;
 use crate::generated::enums::ChannelState as ChannelStateEnum;
 use crate::generated::types::ChannelState;
 use crate::message_box::defs::PossibleGap;
-use crate::UpdateState;
 pub(crate) use defs::Entry;
 pub use defs::{Gap, MessageBox};
-use defs::{PtsInfo, State, NO_DATE, NO_PTS, NO_SEQ, POSSIBLE_GAP_TIMEOUT};
+use defs::{NO_DATE, NO_PTS, NO_SEQ, POSSIBLE_GAP_TIMEOUT, PtsInfo, State};
 use grammers_tl_types as tl;
 use log::{debug, info, trace, warn};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::mem;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tl::enums::InputChannel;
+use web_time::Instant;
 
 fn next_updates_deadline() -> Instant {
     Instant::now() + defs::NO_UPDATES_TIMEOUT
@@ -69,6 +70,8 @@ impl MessageBox {
         trace!("created new message box with state: {:?}", state);
         let deadline = next_updates_deadline();
         let mut map = HashMap::with_capacity(2 + state.channels.len());
+        let mut getting_diff_for = HashSet::with_capacity(2 + state.channels.len());
+
         map.insert(
             Entry::AccountWide,
             State {
@@ -76,6 +79,10 @@ impl MessageBox {
                 deadline,
             },
         );
+        if state.pts != NO_PTS {
+            getting_diff_for.insert(Entry::AccountWide);
+        }
+
         map.insert(
             Entry::SecretChats,
             State {
@@ -83,6 +90,10 @@ impl MessageBox {
                 deadline,
             },
         );
+        if state.qts != NO_PTS {
+            getting_diff_for.insert(Entry::SecretChats);
+        }
+
         map.extend(state.channels.iter().map(|ChannelStateEnum::State(c)| {
             (
                 Entry::Channel(c.channel_id),
@@ -92,13 +103,19 @@ impl MessageBox {
                 },
             )
         }));
+        getting_diff_for.extend(
+            state
+                .channels
+                .iter()
+                .map(|ChannelStateEnum::State(c)| (Entry::Channel(c.channel_id))),
+        );
 
         Self {
             map,
             date: state.date,
             seq: state.seq,
             possible_gaps: HashMap::new(),
-            getting_diff_for: HashSet::new(),
+            getting_diff_for,
             next_deadline: Some(Entry::AccountWide),
             tmp_entries: HashSet::new(),
         }
@@ -712,7 +729,9 @@ impl MessageBox {
             let secret = self.getting_diff_for.contains(&Entry::SecretChats);
 
             if !account && !secret {
-                panic!("Should not be applying the difference when neither account or secret diff was active")
+                panic!(
+                    "Should not be applying the difference when neither account or secret diff was active"
+                )
             }
 
             if account {
@@ -739,7 +758,14 @@ impl MessageBox {
         chat_hashes: &mut ChatHashCache,
     ) -> defs::UpdateAndPeers {
         self.map.get_mut(&Entry::AccountWide).unwrap().pts = state.pts;
-        self.map.get_mut(&Entry::SecretChats).unwrap().pts = state.qts;
+        self.map
+            .entry(Entry::SecretChats)
+            // AccountWide affects SecretChats, but this may not have been initialized yet (#258)
+            .or_insert_with(|| State {
+                pts: NO_PTS,
+                deadline: next_updates_deadline(),
+            })
+            .pts = state.qts;
         self.date = state.date;
         self.seq = state.seq;
 
@@ -848,8 +874,7 @@ impl MessageBox {
         let channel_id = channel_id(&request).expect("request had wrong input channel");
         trace!(
             "applying channel difference for {}: {:?}",
-            channel_id,
-            difference
+            channel_id, difference
         );
         let entry = Entry::Channel(channel_id);
 
@@ -951,8 +976,7 @@ impl MessageBox {
         if let Some(channel_id) = channel_id(request) {
             trace!(
                 "ending channel difference for {} because {:?}",
-                channel_id,
-                reason
+                channel_id, reason
             );
             let entry = Entry::Channel(channel_id);
             match reason {
